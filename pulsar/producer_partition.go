@@ -743,6 +743,9 @@ func (p *partitionProducer) internalSingleSend(
 		leastSigBits = txnID.LeastSigBits
 	}
 
+	debugLogger := p.log.WithField("logger", "TimeoutDebugLogger").WithField("method", "partitionProducer#internalSingleSend").WithField("sequenceID", sid)
+	debugLogger.Debug("Sending message")
+
 	err := internal.SingleSend(
 		buffer,
 		p.producerID,
@@ -757,17 +760,21 @@ func (p *partitionProducer) internalSingleSend(
 	)
 
 	if err != nil {
+		debugLogger.WithField("error", err).Debug("Message failed to send")
 		sr.done(nil, err)
 		p.log.WithError(err).Errorf("Single message serialize failed %s", msg.Value)
 		return
 	}
 
+	sentAt := time.Now()
+	debugLogger.WithField("sentAt", sentAt).WithField("pendingQueue.Size", p.pendingQueue.Size()).Debug("Message sent, putting into pending queue")
 	p.pendingQueue.Put(&pendingItem{
-		sentAt:       time.Now(),
+		sentAt:       sentAt,
 		buffer:       buffer,
 		sequenceID:   sid,
 		sendRequests: []interface{}{sr},
 	})
+	debugLogger.Debug("Message is put into pending queue")
 	p._getConn().WriteData(buffer)
 }
 
@@ -825,27 +832,46 @@ func (p *partitionProducer) internalFlushCurrentBatch() {
 }
 
 func (p *partitionProducer) failTimeoutMessages() {
+	debugLogger := p.log.WithField("logger", "TimeoutDebugLogger").WithField("method", "partitionProducer#failTimeoutMessages")
 	diff := func(sentAt time.Time) time.Duration {
 		return p.options.SendTimeout - time.Since(sentAt)
 	}
+
+	debugLogger.WithField("SendTimeout", p.options.SendTimeout).Debug("Start failTimeoutMessages")
 
 	t := time.NewTimer(p.options.SendTimeout)
 	defer t.Stop()
 
 	for range t.C {
 		state := p.getProducerState()
+		if state == producerInit {
+			debugLogger.Debug("Current producer state: producerInit")
+		} else if state == producerReady {
+			debugLogger.Debug("Current producer state: producerReady")
+		} else if state == producerClosing {
+			debugLogger.Debug("Current producer state: producerClosing")
+		} else if state == producerClosed {
+			debugLogger.Debug("Current producer state: producerClosed")
+		} else {
+			debugLogger.Debug("Current producer state: unknown")
+		}
 		if state == producerClosing || state == producerClosed {
+			debugLogger.Debug("Returning from failTimeoutMessages, producer is closing or closed")
 			return
 		}
 
 		item := p.pendingQueue.Peek()
 		if item == nil {
+			debugLogger.WithField("SendTimeout", p.options.SendTimeout).Debug("Pending queue is empty, reset timer to send timeout")
 			// pending queue is empty
 			t.Reset(p.options.SendTimeout)
 			continue
 		}
 		oldestItem := item.(*pendingItem)
-		if nextWaiting := diff(oldestItem.sentAt); nextWaiting > 0 {
+		nextWaiting := diff(oldestItem.sentAt)
+		debugLogger.WithField("sentAt", oldestItem.sentAt).WithField("nextWaiting", nextWaiting).Debug("Calculated nextWaiting")
+		if nextWaiting > 0 {
+			debugLogger.WithField("nextWaiting", nextWaiting).Debug("none of these pending messages have timed out, wait and retry")
 			// none of these pending messages have timed out, wait and retry
 			t.Reset(nextWaiting)
 			continue
@@ -857,7 +883,9 @@ func (p *partitionProducer) failTimeoutMessages() {
 		// see https://github.com/apache/pulsar-client-go/pull/301
 		curViewItems := p.pendingQueue.ReadableSlice()
 		viewSize := len(curViewItems)
+		debugLogger.WithField("viewSize", viewSize).Debug("Got items from pendingQueue")
 		if viewSize <= 0 {
+			debugLogger.WithField("SendTimeout", p.options.SendTimeout).Debug("viewSize is 0, pendingQueue is empty, reset timer to send timeout")
 			// double check
 			t.Reset(p.options.SendTimeout)
 			continue
@@ -922,6 +950,7 @@ func (p *partitionProducer) internalFlushCurrentBatches() {
 		return
 	}
 
+	debugLogger := p.log.WithField("logger", "TimeoutDebugLogger").WithField("method", "partitionProducer#internalFlushCurrentBatches")
 	for i := range batchesData {
 		// error occurred in processing batch
 		// report it using callback
@@ -942,12 +971,14 @@ func (p *partitionProducer) internalFlushCurrentBatches() {
 		if batchesData[i] == nil {
 			continue
 		}
+		debugLogger.WithField("sequenceID", sequenceIDs[i]).Debug("Putting item into pending queue")
 		p.pendingQueue.Put(&pendingItem{
 			sentAt:       time.Now(),
 			buffer:       batchesData[i],
 			sequenceID:   sequenceIDs[i],
 			sendRequests: callbacks[i],
 		})
+		debugLogger.WithField("sequenceID", sequenceIDs[i]).Debug("Has put item into pending queue")
 		p._getConn().WriteData(batchesData[i])
 	}
 
@@ -1264,6 +1295,8 @@ func (p *partitionProducer) internalSendAsync(
 }
 
 func (p *partitionProducer) ReceivedSendReceipt(response *pb.CommandSendReceipt) {
+	debugLogger := p.log.WithField("logger", "TimeoutDebugLogger").WithField("method", "partitionProducer#ReceivedSendReceipt").WithField("sequenceID", response.GetSequenceId())
+	debugLogger.Debug("Received send receipt (ack)")
 	pi, ok := p.pendingQueue.Peek().(*pendingItem)
 
 	if !ok {
