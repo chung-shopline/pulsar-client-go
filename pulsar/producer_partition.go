@@ -821,6 +821,8 @@ func (p *partitionProducer) internalFlushCurrentBatch() {
 
 		return
 	}
+	debugLogger := p.log.WithField("logger", "TimeoutDebugLogger").WithField("method", "partitionProducer#internalFlushCurrentBatch").WithField("sequenceID", sequenceID)
+	debugLogger.Debug("Sending message")
 
 	p.pendingQueue.Put(&pendingItem{
 		sentAt:       time.Now(),
@@ -1318,6 +1320,7 @@ func (p *partitionProducer) ReceivedSendReceipt(response *pb.CommandSendReceipt)
 		return
 	} else {
 		// The ack was indeed for the expected item in the queue, we can remove it and trigger the callback
+		debugLogger.Debug("Received correct receipt, removing element from pendingQueue")
 		p.pendingQueue.Poll()
 
 		now := time.Now().UnixNano()
